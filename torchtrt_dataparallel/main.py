@@ -15,16 +15,18 @@ import time
 from tqdm import tqdm
 
 def compile_model(batch_size, device, input_shape=(3,224,224), checkpoint=None):
+    torch.cuda.set_device(device)
     with torch.no_grad():
-        original_model = resnet50().cuda(device=f'cuda:{device}').eval()
+        original_model = resnet50().eval()
         if checkpoint is not None:
             ckp = torch.load(checkpoint, map_location=f'cuda:{device}')
             original_model.load_state_dict(ckp)        
         st = time.time()
         print("Converting")
-        model_trt = torch2trt(original_model, [torch.randn(batch_size,*input_shape).cuda(device=f'cuda:{device}')], 
+        model_trt = torch2trt(original_model.cuda(device=f'cuda:{device}'), [torch.randn(batch_size,*input_shape).cuda(device=f'cuda:{device}')], 
             fp16_mode=True, use_onnx=True, max_batch_size=batch_size)
         print(f"Done in {time.time()-st:0.5f}sec")
+    original_model.cpu()
     del original_model
     return model_trt
     
@@ -36,18 +38,18 @@ class dummy_dataset(Dataset):
         return torch.randn(3, 224, 224), torch.randint(0, 1000, (1,)).item()
         
     def __len__(self):
-        return 10240
+        return 204800
 
-def run_single_inference():
+def run_single_inference(batch_size):
     dataset = dummy_dataset()
-    dataloader = DataLoader(dataset, batch_size=32, shuffle=False, num_workers=16)
-    model = compile_model(batch_size=32, device=0)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=16)
+    model = compile_model(batch_size=batch_size, device=0)
     model.eval()
     st = time.time()
     for data, target in tqdm(dataloader):
         _ = model(data.cuda(device=0))
     del model
-    print(f"Done in {time.time()-st:0.5f}sec")
+    print(f"Single Done in {time.time()-st:0.5f}sec")
     
     
 def batch_consumer(device, batch_size, data_queue, result_queue, compile_monitor):
@@ -70,7 +72,7 @@ class DataParallelTRT:
         data_queue_list = []
         result_queue_list = []
         compile_monitor = Queue()
-        from multiprocessing import Manager
+        
         self.model_list = {}
         if batch_size_list is None:
             batch_size_list = [total_batch_size//len(device_indices)]*len(device_indices)
@@ -109,16 +111,16 @@ class DataParallelTRT:
     def __call__(self, x):
         return self.forward(x)
             
-def run_multi_inference():
+def run_multi_inference(batch_size):
     dataset = dummy_dataset()
-    dataloader = DataLoader(dataset, batch_size=128, shuffle=False, num_workers=16)
-    model = DataParallelTRT(device_indices=[0,1,2,3], batch_size_list=[32,32,32,32])
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=16)
+    model = DataParallelTRT(device_indices=[0,1,2,3], batch_size_list=[batch_size//4]*4)
     st = time.time()
     for data, target in tqdm(dataloader):
         _ = model(data)
     for data_queue in model.data_queue_list:
         data_queue.put(None)
-    print(f"Done in {time.time()-st:0.5f}sec")
+    print(f"Mult Done in {time.time()-st:0.5f}sec")
     
     del model
     
@@ -182,19 +184,19 @@ class DataParallelTRT_DistSample:
     def __call__(self):
         return self.forward()
             
-def run_multi_inference_sample():
-    model = DataParallelTRT_DistSample(device_indices=[0,1,2,3], batch_size_list=[32,32,32,32])
+def run_multi_inference_sample(batch_size):
+    model = DataParallelTRT_DistSample(device_indices=[0,1,2,3], batch_size_list=[batch_size//4]*4)
     st = time.time()
     while True:
         out = model()
         if out is None:
             break
-    print(f"Done in {time.time()-st:0.5f}sec")
+    print(f"Mult-Sample Done in {time.time()-st:0.5f}sec")
     
     del model
 
 
 if __name__ == "__main__":
-    run_single_inference()
-    run_multi_inference()
-    run_multi_inference_sample()
+    # run_single_inference(256)
+    # run_multi_inference(1024)
+    run_multi_inference_sample(1024)
